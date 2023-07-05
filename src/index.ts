@@ -67,7 +67,7 @@ const readFromS3 = async (bucket: string, key: string): Promise<string> => {
 const writeToDynamo = async (seriesName: string, price_as_of: Date, coinIssue: CoinIssue): Promise<void> => {
   // Primary Key is seriesName|coinIssue.name|coinIssue.variety
   const primaryKey = coinIssue.variety ? `${seriesName}|${coinIssue.name}|${coinIssue.variety}` : `${seriesName}|${coinIssue.name}`;
-  
+
   // Create price JSON object from coinIssues.prices
   const prices: any = {};
   coinIssue.prices.forEach((price: CoinPrice) => {
@@ -78,7 +78,7 @@ const writeToDynamo = async (seriesName: string, price_as_of: Date, coinIssue: C
   try {
     const client = new DynamoDBClient({});
     const docClient = DynamoDBDocumentClient.from(client);
-    
+
     const command = new PutCommand({
       TableName: process.env.DYNAMODB_TABLE,
       Item: {
@@ -87,7 +87,7 @@ const writeToDynamo = async (seriesName: string, price_as_of: Date, coinIssue: C
         prices: JSON.stringify(prices),
       },
     });
-  
+
     await docClient.send(command);
   }
   catch (e) {
@@ -108,7 +108,7 @@ exports.handler = async (event: any, context: any) => {
 
   try {
       // Let's read the list from S3 -- if not present, try to generate and read
-      let dataStr: string = await readFromS3(bucket, key);
+      const dataStr: string = await readFromS3(bucket, key);
       const seriesName: string = (key.split("/")[1]).split(".csv")[0];
       const price_as_of: Date = new Date(key.split("/")[0]);
 
@@ -130,9 +130,8 @@ exports.handler = async (event: any, context: any) => {
         }
       }
   } catch (err) {
-      console.log(err);
       const message = `Error getting object ${key} from bucket ${bucket}. Make sure they exist and your bucket is in the same region as this function.`;
-      console.log(message);
+      logger.info(message, { err });
       throw new Error(message);
   }
 };
