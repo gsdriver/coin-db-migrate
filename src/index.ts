@@ -1,67 +1,10 @@
 /* tslint:disable-next-line */
 const config = require("dotenv").config();
 import * as logger from "./logger";
+import { CoinIssue, CoinPrice, formatDate, listKeys, readFromS3 } from "./utils";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { PutCommand, DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-
-interface CoinPrice {
-  grade: number;
-  price: number;
-}
-
-interface CoinIssue {
-  name: string; // Eventually will break out year, mintmark, variety
-  variety?: string;
-  prices: CoinPrice[];
-}
-
-interface CoinSeries {
-  name: string;
-  issues: CoinIssue[];
-  price_as_of: Date;
-}
-
-const zeroPad = (d: number) => {
-  return (`0${d}`).slice(-2);
-};
-
-const formatDate = (d: Date | undefined): string => {
-  if (!d) {
-    return "";
-  }
-
-  return `${d.getFullYear()}-${zeroPad(d.getMonth() + 1)}-${zeroPad(d.getDate())}`;
-};
-
-const readFromS3 = async (bucket: string, key: string): Promise<string> => {
-  let value: any;
-  const region = "us-west-2";
-  const client = new S3Client({ region });
-
-  try {
-    const streamToString = (stream: any) =>
-      new Promise((resolve, reject) => {
-        const chunks: any[] = [];
-        stream.on("data", (chunk: any) => chunks.push(chunk));
-        stream.on("error", reject);
-        stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      });
-
-    const command = new GetObjectCommand({
-      Bucket: bucket,
-      Key: key,
-    });
-
-    const { Body } = await client.send(command);
-    value = await streamToString(Body);
-  }
-  catch (e) {
-    logger.info("Error reading from S3", { value });
-  }
-
-  return value;
-};
 
 // Write a function that writes a CoinIssue to DynamoDB
 const writeToDynamo = async (seriesName: string, price_as_of: Date, coinIssue: CoinIssue): Promise<void> => {
@@ -74,33 +17,32 @@ const writeToDynamo = async (seriesName: string, price_as_of: Date, coinIssue: C
     prices[price.grade] = price.price;
   });
 
+  const params = {
+    TableName: process.env.DYNAMODB_TABLE,
+    Item: {
+      coin: primaryKey,
+      price_as_of: formatDate(price_as_of),
+      prices: JSON.stringify(prices),
+    },
+  };
+
   // Write the item to DynamoDB
   try {
     const client = new DynamoDBClient({});
     const docClient = DynamoDBDocumentClient.from(client);
-
-    const command = new PutCommand({
-      TableName: process.env.DYNAMODB_TABLE,
-      Item: {
-        coin: primaryKey,
-        price_as_of: formatDate(price_as_of),
-        prices: JSON.stringify(prices),
-      },
-    });
+    const command = new PutCommand(params);
 
     await docClient.send(command);
   }
   catch (e) {
-    logger.info("Error writing to DynamoDB", { seriesName, price_as_of, coinIssue });
+    logger.info("Error writing info to DynamoDB", { seriesName, price_as_of, coinIssue, params });
+    logger.error((e as any)?.message, "Error writing to DynamoDB");
   }
 };
 
-exports.handler = async (event: any, context: any) => {
-  logger.info("received event", { event });
-
+const processKey = async (bucket: string, keyName: string): Promise<void> => {
   // Get the object from the event and show its content type
-  const bucket = event.Records[0].s3.bucket.name;
-  const key = decodeURIComponent(event.Records[0].s3.object.key.replace(/\+/g, ' '));
+  const key = decodeURIComponent(keyName.replace(/\+/g, ' '));
   const params = {
       Bucket: bucket,
       Key: key,
@@ -118,7 +60,7 @@ exports.handler = async (event: any, context: any) => {
       let l: number;
       for (l = 1; l < lines.length; l++) {
         const issue: string[] = lines[l].split(",");
-        if (issue.length >= header.length) {
+        if ((issue.length >= header.length) && !!issue[0]?.length) {
           const coinIssue: CoinIssue = { name: issue[0], variety: issue[1], prices: [] };
           let p: number;
           for (p = 2; p < issue.length; p++) {
@@ -133,5 +75,28 @@ exports.handler = async (event: any, context: any) => {
       const message = `Error getting object ${key} from bucket ${bucket}. Make sure they exist and your bucket is in the same region as this function.`;
       logger.info(message, { err });
       throw new Error(message);
+  }
+};
+
+const runBackfill = async (): Promise<void> => {
+  // Get the list of keys from S3
+  const keyList: string[] = await listKeys();
+
+  // Loop thru the keys and process each one
+  let k: number;
+  for (k = 0; k < keyList.length; k++) {
+    await processKey(process.env.S3_BUCKET!, keyList[k]);
+  }
+};
+
+exports.handler = async (event: any, context: any) => {
+  logger.info("received event", { event });
+
+  if (event.runBackfill) {
+    await runBackfill();
+  } else if (event.Records?.length && event.Records[0].eventSource === "aws:s3") {
+    await processKey(event.Records[0].s3.bucket.name, event.Records[0].s3.object.key);
+  } else {
+    logger.info("Event not recognized", { event });
   }
 };
