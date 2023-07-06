@@ -3,8 +3,10 @@ const config = require("dotenv").config();
 import * as logger from "./logger";
 import { CoinIssue, CoinPrice, formatDate, listKeys, readFromS3 } from "./utils";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { PutCommand, DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+
+const LASTRUNFILE = "coin-db-migrate/latest.txt";
 
 // Write a function that writes a CoinIssue to DynamoDB
 const writeToDynamo = async (seriesName: string, price_as_of: Date, coinIssue: CoinIssue): Promise<void> => {
@@ -82,10 +84,37 @@ const runBackfill = async (): Promise<void> => {
   // Get the list of keys from S3
   const keyList: string[] = await listKeys();
 
-  // Loop thru the keys and process each one
-  let k: number;
-  for (k = 0; k < keyList.length; k++) {
-    await processKey(process.env.S3_BUCKET!, keyList[k]);
+  // Which one are we on?
+  let lastRunNum: number | undefined;
+  try {
+    const lastRun: string = await readFromS3(process.env.S3_CONFIG_BUCKET!, LASTRUNFILE);
+
+    if (lastRun === "COMPLETE") {
+      // We are done - no need to process anything
+      logger.info("Done with backfill", { lastRun });
+    } else {
+      lastRunNum = parseInt(lastRun, 10);
+    }
+  } catch(e) {
+    logger.error((e as any)?.message, "Error getting last run number");
+  }
+
+  // Process this key if it isn't beyond the end of the date range
+  if (lastRunNum !== undefined) {
+    logger.info("Getting key", { lastRunNum, key: keyList[lastRunNum] });
+    await processKey(process.env.S3_BUCKET!, keyList[lastRunNum]);
+
+    // Now save to S3
+    const client: S3Client = new S3Client({
+      region: "us-west-2",
+    });
+
+    const command = new PutObjectCommand({
+      Body: lastRunNum < keyList.length - 1 ? (lastRunNum + 1).toString() : "COMPLETE",
+      Bucket: process.env.S3_CONFIG_BUCKET,
+      Key: LASTRUNFILE,
+    });
+    await client.send(command);
   }
 };
 

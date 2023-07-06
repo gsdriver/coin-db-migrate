@@ -56,6 +56,17 @@ export const listKeys = async(): Promise<string[]> => {
     keyList = [];
   }
 
+  // Sort the keylist so it's in date order
+  keyList.sort((a, b) => {
+    const aDate = new Date(a.split("/")[0]);
+    const bDate = new Date(b.split("/")[0]);
+
+    if (aDate.getTime() === bDate.getTime()) {
+      return a.split("/")[1].localeCompare(b.split("/")[1]);
+    } else {
+      return aDate.getTime() - bDate.getTime();
+    }
+  });
   return keyList;
 };
 
