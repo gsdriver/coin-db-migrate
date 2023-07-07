@@ -1,3 +1,5 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { QueryCommand, QueryCommandInput, DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import * as logger from "./logger";
 
@@ -109,4 +111,43 @@ export const readFromS3 = async (bucket: string, key: string): Promise<string> =
   }
 
   return value;
+};
+
+export const readPriceHistory = async (series: string, issue: string, variety: string | undefined): Promise<{ price_as_of: Date, prices: CoinPrice[] }[]> => {
+  const history: { price_as_of: Date, prices: CoinPrice[] }[] = [];
+
+  // Let's read this in from DynamoDB
+  const params: QueryCommandInput = {
+    TableName: process.env.DYNAMODB_TABLE,
+    KeyConditionExpression: "coin = :coin",
+    ExpressionAttributeValues: {
+      ":coin": `${series}|${issue}${variety ? `|${variety}` : ""}`,
+    },
+  };
+
+  // Read items from DynamoDB
+  try {
+    const client = new DynamoDBClient({});
+    const docClient = DynamoDBDocumentClient.from(client);
+    const command = new QueryCommand(params);
+
+    const results = await docClient.send(command);
+    results.Items?.forEach((item: any) => {
+      const prices: CoinPrice[] = [];
+      const priceObj = JSON.parse(item.prices);
+      Object.keys(priceObj).forEach((key: string) => {
+        prices.push({ grade: parseInt(key, 10), price: priceObj[key] });
+      });
+      history.push({
+        price_as_of: new Date(item.price_as_of),
+        prices,
+      });
+    });
+  }
+  catch (e) {
+    logger.info("Error querying info from DynamoDB", { series, issue, variety, params });
+    logger.error((e as any)?.message, "Error reading from DynamoDB");
+  }
+
+  return history;
 };
