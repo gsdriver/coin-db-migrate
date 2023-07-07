@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { QueryCommand, QueryCommandInput, DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { QueryCommand, QueryCommandInput, ScanCommand, ScanCommandInput, DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import * as logger from "./logger";
 
@@ -113,6 +113,9 @@ export const readFromS3 = async (bucket: string, key: string): Promise<string> =
   return value;
 };
 
+// Reads in a price history for the given coin series, issue, and variety
+// If no exact match on the variety is found, we will attempt to find a match
+// ignoring the variety
 export const readPriceHistory = async (series: string, issue: string, variety: string | undefined): Promise<{ price_as_of: Date, prices: CoinPrice[] }[]> => {
   const history: { price_as_of: Date, prices: CoinPrice[] }[] = [];
 
@@ -130,8 +133,21 @@ export const readPriceHistory = async (series: string, issue: string, variety: s
     const client = new DynamoDBClient({});
     const docClient = DynamoDBDocumentClient.from(client);
     const command = new QueryCommand(params);
+    let results = await docClient.send(command);
 
-    const results = await docClient.send(command);
+    if (!results.Items?.length) {
+      // There was no match - let's see if we can find a key ignoring the variety
+      const scanParams: ScanCommandInput = {
+        TableName: process.env.DYNAMODB_TABLE,
+        FilterExpression: "begins_with(coin, :coin)",
+        ExpressionAttributeValues: {
+          ":coin": `${series}|${issue}`,
+        }
+      };
+
+      results = await docClient.send(new ScanCommand(scanParams));
+    }
+
     results.Items?.forEach((item: any) => {
       const prices: CoinPrice[] = [];
       const priceObj = JSON.parse(item.prices);
